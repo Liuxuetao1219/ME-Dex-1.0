@@ -1,16 +1,18 @@
 # ME-Dex-1.0
 
-A Video–Action–Tactile policy for robotic manipulation. This repository provides inference code for standardized RoboTwin leaderboard evaluation using XPolicyLib.
+ME-Dex-1.0 is a video-action-tactile policy trained on RoboTwin Clean50. This repository provides its inference runtime for standardized RoboTwin leaderboard evaluation using XPolicyLib.
 
 ## Model weights
 
-Download the model and tactile encoder from [Hugging Face](https://huggingface.co/liuxuetao/ME-Dex-1.0-RoboTwin-Clean2Random-Leaderboard).
-Additional VAE, text encoder and tokenizer assets are available from [Wan2.2](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B).
+Model and tactile AE weights are available at [liuxuetao/ME-Dex-1.0-RoboTwin-Clean2Random-Leaderboard](https://huggingface.co/liuxuetao/ME-Dex-1.0-RoboTwin-Clean2Random-Leaderboard). The runtime also uses the VAE, T5 encoder, tokenizer and config from [Wan-AI/Wan2.2-TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B).
 
 ## Usage
 
 Install the dependencies with `pip install -r runtime/requirements.txt`.
-Evaluation is performed through XPolicyLib.
+
+The evaluation interface supplies RGB observations. Set `input_color_order: bgr` so the runtime performs the single RGB-to-BGR conversion expected by the checkpoint. The runtime does not apply mean/std image normalization.
+
+Clean50 training included additionally collected three-axis tactile force data. RoboTwin leaderboard observations contain no tactile measurements, so the current-frame tactile force is set to zero while preserving the sensor support mask. Future tactile states are predicted by the model.
 
 ## Acknowledgements
 
