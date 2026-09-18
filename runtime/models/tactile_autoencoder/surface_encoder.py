@@ -4,39 +4,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .residual import ResidualBlock2d
+from .surface_type import surface_type_ids
+
 from .config import AnatomyTactileAEV3Config
 from .layers import FP32LayerNorm
-
-
-class ResidualBlock2d(nn.Module):
-    def __init__(self, channels: int):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.GroupNorm(8, channels),
-            nn.SiLU(),
-            nn.Conv2d(channels, channels, 3, padding=1),
-            nn.GroupNorm(8, channels),
-            nn.SiLU(),
-            nn.Conv2d(channels, channels, 3, padding=1),
-        )
-
-    def forward(self, values: torch.Tensor) -> torch.Tensor:
-        return values + self.net(values)
-
-
-def surface_type_ids(finger_id: torch.Tensor, segment_id: torch.Tensor) -> torch.Tensor:
-    table = finger_id.new_full((7, 5), -1)
-    table[0, 0] = 0
-    for finger, base in ((1, 1), (2, 4), (3, 7), (4, 10), (6, 13)):
-        table[finger, 1] = base
-        table[finger, 2] = base + 1
-        table[finger, 3] = base + 2
-    table[5, 4] = 16
-    result = table[finger_id, segment_id]
-    if (result < 0).any():
-        invalid = torch.stack((finger_id[result < 0], segment_id[result < 0]), dim=-1)
-        raise ValueError(f"Invalid finger/segment combination: {invalid[0].tolist()}")
-    return result
 
 
 class LocalSurfaceEncoderV3(nn.Module):
@@ -111,7 +83,7 @@ class SurfaceTokenizerV3(nn.Module):
         token_valid = denominator.flatten(1).gt(0)
         surface_tokens = surface_tokens.reshape(batch, regions, 4, -1)
         token_valid = token_valid.reshape(batch, regions, 4)
-        surface_ids = surface_type_ids(finger_id, segment_id)
+        surface_ids = surface_type_ids(finger_id, segment_id, include_proximal=self.config.extended_pad_layout)
         identity = self.hand_embedding(hand_side_id) + self.surface_type_embedding(surface_ids)
         identity = identity.to(surface_tokens.dtype)
         surface_tokens = self.output_norm(surface_tokens + identity[:, :, None])

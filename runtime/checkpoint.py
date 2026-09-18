@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 
-VARIANT = "ME-X-1.0"
+VARIANT = "ME-Dex-1.0"
 
 
 def _resolve_asset(root: Path, value: str) -> Path:
@@ -26,17 +26,17 @@ def load_metadata(export_dir: str | Path) -> dict[str, Any]:
     }
     for name, path in paths.items():
         if not path.is_file():
-            raise FileNotFoundError(f"Missing ME-X-1.0 {name}: {path}")
+            raise FileNotFoundError(f"Missing ME-Dex-1.0 {name}: {path}")
     manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
     config = json.loads(paths["config"].read_text(encoding="utf-8"))
     if manifest.get("format_version") != 3 or config.get("format_version") != 3:
-        raise ValueError("ME-X-1.0 requires export format_version=3")
+        raise ValueError("ME-Dex-1.0 requires export format_version=3")
     if manifest.get("variant") != VARIANT or config.get("variant") != VARIANT:
-        raise ValueError("Checkpoint is not the ME-X-1.0 variant")
+        raise ValueError("Checkpoint is not the ME-Dex-1.0 variant")
     if manifest.get("step") != config.get("step") or not isinstance(config.get("step"), int):
         raise ValueError("Manifest/config checkpoint step mismatch")
     if config.get("architecture") != "wam_va" or config.get("joint_attention_mode") != "full_bidirectional":
-        raise ValueError("ME-X-1.0 architecture contract mismatch")
+        raise ValueError("ME-Dex-1.0 architecture contract mismatch")
     common = config.get("common", {})
     expected_common = {
         "action_dim": 14,
@@ -51,20 +51,20 @@ def load_metadata(export_dir: str | Path) -> dict[str, Any]:
     }
     mismatch = {key: common.get(key) for key, value in expected_common.items() if common.get(key) != value}
     if mismatch:
-        raise ValueError(f"ME-X-1.0 common contract mismatch: {mismatch}")
+        raise ValueError(f"ME-Dex-1.0 common contract mismatch: {mismatch}")
     tactile = config.get("model", {}).get("tactile", {})
-    if tactile.get("enabled") is not True or tactile.get("codec_type") != "v3_anatomy":
-        raise ValueError("ME-X-1.0 requires the frozen V3 anatomy tactile codec")
+    if tactile.get("enabled") is not True or tactile.get("codec_type") != "v3_newdata":
+        raise ValueError("ME-Dex-1.0 requires the frozen V3 anatomy tactile codec")
     expert = config.get("model", {}).get("tactile_expert", {})
     for key, value in {
         "latent_dim": 256,
-        "latent_slices": 18,
+        "latent_slices": 17,
         "queries_per_slice": 12,
-        "condition_slices": 2,
+        "condition_slices": 1,
         "hidden_size": 512,
     }.items():
         if expert.get(key) != value:
-            raise ValueError(f"ME-X-1.0 tactile expert mismatch: {key}")
+            raise ValueError(f"ME-Dex-1.0 tactile expert mismatch: {key}")
     tactile_checkpoint = _resolve_asset(root, str(tactile["checkpoint_path"]))
     if not tactile_checkpoint.is_file():
         raise FileNotFoundError(f"Missing V3 tactile checkpoint: {tactile_checkpoint}")
@@ -83,6 +83,6 @@ def load_model_state_strictly(model: nn.Module, metadata: dict[str, Any]) -> dic
     )
     state = checkpoint.get("module") if isinstance(checkpoint, Mapping) else None
     if not isinstance(state, Mapping):
-        raise TypeError("ME-X-1.0 checkpoint must contain a module state dictionary")
+        raise TypeError("ME-Dex-1.0 checkpoint must contain a module state dictionary")
     model.load_state_dict(state, strict=True)
     return {"state_key_count": len(state)}

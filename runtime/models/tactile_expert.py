@@ -1,4 +1,4 @@
-"""Tactile expert used by ME-X-1.0 joint attention."""
+"""Tactile expert used by ME-Dex-1.0 joint attention."""
 
 from __future__ import annotations
 
@@ -36,9 +36,9 @@ def sinusoidal_embedding_1d(dim: int, positions: torch.Tensor) -> torch.Tensor:
 @dataclass(frozen=True)
 class UniversalTactileExpertConfig:
     latent_dim: int = 256
-    latent_slices: int = 18
+    latent_slices: int = 17
     queries_per_slice: int = 12
-    condition_slices: int = 2
+    condition_slices: int = 1
     hidden_size: int = 512
     ffn_multiplier: int = 4
     num_layers: int = 30
@@ -63,12 +63,12 @@ class UniversalTactileExpertConfig:
             self.queries_per_slice,
             self.condition_slices,
         )
-        if contract != (256, 18, 12, 2):
+        if contract != (256, 17, 12, 1):
             raise ValueError(
-                f"ME-X-1.0 requires tactile latent contract (256,18,12,2), got {contract}"
+                f"ME-Dex-1.0 requires tactile latent contract (256,17,12,1), got {contract}"
             )
         if self.hidden_size != 512:
-            raise ValueError("ME-X-1.0 tactile expert requires hidden_size=512")
+            raise ValueError("ME-Dex-1.0 tactile expert requires hidden_size=512")
 
     @property
     def future_slices(self) -> int:

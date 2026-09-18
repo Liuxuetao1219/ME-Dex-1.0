@@ -1,123 +1,61 @@
-from __future__ import annotations
-
+"""Frozen new-data V3 AE encoder: physical force -> [B,T,12,256]."""
 from pathlib import Path
-
 import torch
-
-from .tactile_autoencoder import (
-    AnatomyEncoderV3,
-    AnatomyTactileAEV3Config,
-    DomainRobustNormalizer,
-)
+from .tactile_autoencoder import AnatomyEncoderV3, AnatomyTactileAEV3Config
+from .tactile_autoencoder.metadata import packed_metadata
+from .tactile_autoencoder.normalizer import ForceNormalizerV41
+from .tactile_autoencoder.normalization_config import ForceNormalizationV41Config
 
 
 class TactileAE:
-    """Immutable V3 TacAE encoder and the audited RoboTwin physical contract.
+    def __init__(self, *, checkpoint_path, device, dtype):
+        state = torch.load(Path(checkpoint_path), map_location="cpu", weights_only=False)
+        config = state["config"]
+        if state["architecture"] != "tactile_ae_v3_newdata":
+            raise ValueError("ME-Dex-1.0 requires the new V3 AE, not VAE or legacy V3")
+        if config["model"]["variant"] != "ae" or config["sequence"]["window_frames"] != 16:
+            raise ValueError("Expected the chunk16 AE checkpoint")
+        self.model = AnatomyEncoderV3(AnatomyTactileAEV3Config(
+            max_regions=32, surface_type_types=22, extended_pad_layout=True))
+        weights = {key.removeprefix("core.encoder."): value
+                   for key, value in state["ema"]["shadow"].items()
+                   if key.startswith("core.encoder.")}
+        self.model.load_state_dict(weights, strict=True)
+        self.model.eval().requires_grad_(False).to(device=device, dtype=dtype)
+        robot = next(d for d in config["domains"] if d["name"] == "robotwin_clean")
+        spec = config["normalizations"][robot["normalization"]]
+        if spec["type"] != "positive_normal_si":
+            raise ValueError("Expected RoboTwin positive-normal physical forces")
+        self.normalizer = ForceNormalizerV41(
+            ForceNormalizationV41Config(**spec["parameters"])).to(device=device)
+        self.slots = torch.tensor([[0, 1, 2, 3], [4, 5, 6, 7],
+                                   [17, 18, 19, 20], [21, 22, 23, 24]], device=device)
+        self.device, self.dtype = device, dtype
 
-    The codec is intentionally not registered as a ME-X-1.0 submodule because
-    its frozen weights are loaded from ``tactile_ae.pt``.
-    """
-
-    def __init__(
-        self,
-        *,
-        checkpoint_path: str,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> None:
-        checkpoint = Path(checkpoint_path).resolve()
-        state = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        schema = state.get("schema", {})
-        if schema.get("architecture") != "universal_anatomy_tactile_ae_v3":
-            raise ValueError(f"Unexpected tactile codec schema: {schema}")
-        if schema.get("latent_frame") != "[B,12,256]" or schema.get("time_compression") is not False:
-            raise ValueError("ME-X-1.0 requires the non-temporal [B,12,256] V3 codec")
-        config = AnatomyTactileAEV3Config(**schema["config"])
-        model = AnatomyEncoderV3(config)
-        weights = state.get("ema", {}).get("shadow")
-        if weights is None:
-            raise ValueError("V3 checkpoint does not contain EMA weights")
-        encoder_weights = {
-            key.removeprefix("encoder."): value
-            for key, value in weights.items()
-            if key.startswith("encoder.")
-        }
-        incompatible = model.load_state_dict(encoder_weights, strict=True)
-        if incompatible.missing_keys or incompatible.unexpected_keys:
-            raise RuntimeError(f"Strict V3 load failed: {incompatible}")
-        model.eval().requires_grad_(False).to(device=device, dtype=dtype)
-        self.model = model
-        self.normalizer = DomainRobustNormalizer.from_state_dict(state["normalizer"])
-        self.device = device
-        self.dtype = dtype
-
-    def assert_frozen(self) -> None:
+    def assert_frozen(self):
         if self.model.training or any(p.requires_grad for p in self.model.parameters()):
-            raise RuntimeError("V3 tactile encoder must remain eval-only and frozen")
-
-    @staticmethod
-    def _metadata(batch: int, time: int, device: torch.device) -> dict[str, torch.Tensor]:
-        region_mask = torch.zeros(batch, time, 30, dtype=torch.bool, device=device)
-        region_mask[:, :, :4] = True
-        grid_mask = torch.zeros(batch, time, 30, 10, 14, dtype=torch.bool, device=device)
-        grid_mask[:, :, :4] = True
-        u = torch.linspace(-1.0, 1.0, 14, device=device)
-        v = torch.linspace(-1.0, 1.0, 10, device=device)
-        vv, uu = torch.meshgrid(v, u, indexing="ij")
-        uv = torch.stack((uu, vv), dim=0)
-        uv_coordinates = torch.zeros(batch, time, 30, 2, 10, 14, device=device)
-        uv_coordinates[:, :, :4] = uv
-        hand = torch.zeros(batch, time, 30, dtype=torch.long, device=device)
-        finger = torch.zeros_like(hand)
-        segment = torch.zeros_like(hand)
-        hand[:, :, :4] = hand.new_tensor((1, 1, 2, 2))
-        finger[:, :, :4] = finger.new_tensor((1, 2, 1, 2))
-        segment[:, :, :4] = 1
-        return {
-            "region_mask": region_mask,
-            "grid_mask": grid_mask,
-            "uv_coordinates": uv_coordinates,
-            "hand_side_id": hand,
-            "finger_id": finger,
-            "segment_id": segment,
-        }
+            raise RuntimeError("Tactile AE must stay frozen and eval-only")
 
     @torch.no_grad()
-    def encode_raw(
-        self,
-        observed_source: torch.Tensor,
-        future_source: torch.Tensor,
-        **_: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Dataset layout is [B,R,T,3,10,14]; V3 layout is [B,T,R,3,10,14].
-        force = torch.cat((observed_source, future_source), dim=2).permute(0, 2, 1, 3, 4, 5)
-        batch, time, regions = force.shape[:3]
-        if (time, regions) != (18, 4):
-            raise ValueError(f"Expected RoboTwin tactile [B,4,18,3,10,14], got {tuple(force.shape)}")
-        metadata = self._metadata(batch, time, force.device)
-        canonical = torch.zeros(batch, time, 30, 3, 10, 14, device=force.device, dtype=force.dtype)
-        canonical[:, :, :4] = force
-        valid = metadata["region_mask"][..., None, None, None] & metadata["grid_mask"][..., None, :, :]
-        group_ids = torch.ones(batch, dtype=torch.long, device=force.device)
-        normalized = self.normalizer.normalize(canonical.float(), group_ids, valid)
-        flat_metadata = {
-            key: value.flatten(0, 1) for key, value in metadata.items()
-        }
-        encoded = self.model(
-            normalized.to(dtype=self.dtype).flatten(0, 1), **flat_metadata
-        )
-        tokens = encoded["frame_tokens"].reshape(batch, time, 12, -1)
-        token_valid = encoded["anatomy_token_valid"].reshape(batch, time, 12)
-        # Keep the fixed 12-slot anatomy interface. token_valid is returned for
-        # auditing; missing anatomical slots are not mistaken for sensor zeros.
-        return tokens, token_valid
-
-    @torch.no_grad()
-    def encode_condition(self, observed_source: torch.Tensor, **_: torch.Tensor):
-        if observed_source.ndim != 6 or observed_source.shape[2] != 2:
-            raise ValueError("Observed RoboTwin tactile must be [B,4,2,3,10,14]")
-        future = observed_source.new_zeros(
-            observed_source.shape[0], 4, 16, 3, 10, 14
-        )
-        tokens, valid = self.encode_raw(observed_source, future)
-        return tokens[:, :2], valid[:, :2]
+    def encode_condition(self, observed_source, *, observed_support_source, **_):
+        self.assert_frozen()
+        force = observed_source.to(device=self.device, dtype=torch.float32)
+        support = observed_support_source.to(device=self.device, dtype=torch.bool)
+        batch = force.shape[0]
+        if force.shape[1:] != (4, 1, 3, 10, 14) or support.shape != (batch, 4, 1, 1, 10, 14):
+            raise ValueError("Expected current-frame force[B,4,1,3,10,14] and structural support")
+        # Exact training preprocessing. Physical zeros do NOT mean zero latent.
+        normalized, _, _ = self.normalizer.normalize(force, support)
+        native, packed = packed_metadata(support[:, :, 0].flatten(0, 1), self.slots.repeat(batch, 1))
+        owner = torch.arange(batch, device=self.device).repeat_interleave(4)
+        dest = owner * 32 + native
+        dense = normalized.new_zeros(batch * 32, 1, 3, 10, 14).to(self.dtype)
+        dense = dense.index_copy(0, dest, normalized.flatten(0, 1).to(self.dtype))
+        dense = dense.reshape(batch, 32, 1, 3, 10, 14).transpose(1, 2).flatten(0, 1)
+        metadata = {}
+        for key, value in packed.items():
+            filled = value.new_zeros(batch * 32, *value.shape[1:]).index_copy(0, dest, value)
+            metadata[key] = filled.reshape(batch, 32, *value.shape[1:])
+        encoded = self.model(dense, **metadata)
+        return (encoded["frame_tokens"].reshape(batch, 1, 12, 256),
+                encoded["anatomy_token_valid"].reshape(batch, 1, 12))

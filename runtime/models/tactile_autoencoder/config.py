@@ -1,7 +1,5 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
-
 
 @dataclass(frozen=True)
 class AnatomyTactileAEV3Config:
@@ -20,16 +18,17 @@ class AnatomyTactileAEV3Config:
     hand_side_types: int = 3
     surface_type_types: int = 17
     support_threshold: float = 0.5
+    extended_pad_layout: bool = False
 
     def __post_init__(self) -> None:
         fixed = {
-            "max_regions": 30,
+            "max_regions": 32 if self.extended_pad_layout else 30,
             "input_channels": 6,
             "latent_dim": 256,
             "tokens_per_region": 4,
             "anatomy_tokens": 12,
             "hand_side_types": 3,
-            "surface_type_types": 17,
+            "surface_type_types": 22 if self.extended_pad_layout else 17,
         }
         for name, expected in fixed.items():
             if getattr(self, name) != expected:
@@ -43,6 +42,6 @@ class AnatomyTactileAEV3Config:
 
     @property
     def tokens_per_surface(self) -> int:
-        """Number of latent tokens produced for each tactile surface."""
+        """Compatibility name for the audited V6 local surface encoder."""
 
         return self.tokens_per_region

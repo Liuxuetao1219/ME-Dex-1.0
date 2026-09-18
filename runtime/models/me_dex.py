@@ -1,4 +1,4 @@
-"""ME-X-1.0 video-action-tactile model used by the evaluation runtime."""
+"""ME-Dex-1.0 video-action-tactile model used by the evaluation runtime."""
 
 import math
 import torch
@@ -39,7 +39,7 @@ def build_flowmatch_sigma_schedule(
 
 
 @dataclass
-class MEXConfig:
+class MEDexConfig:
     """Architecture settings required to instantiate the released checkpoint."""
 
     vae_path: str = ""
@@ -180,7 +180,7 @@ class VideoModule(nn.Module):
         action_block: nn.Module,
         tactile_block: nn.Module,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """ME-X-1.0 all-to-all Video-Action-Tactile attention in one WAN call."""
+        """ME-Dex-1.0 all-to-all Video-Action-Tactile attention in one WAN call."""
         wan_layer = self.video_model.wan_model.blocks[layer_idx]
         v_mod = video_adaln_modulation
         a_mod = action_adaln_modulation
@@ -315,10 +315,10 @@ class ActionModule(nn.Module):
         return action_tokens
 
 
-class MEXModel(nn.Module):
-    """Released ME-X-1.0 video-action-tactile inference model."""
+class MEDexModel(nn.Module):
+    """Released ME-Dex-1.0 video-action-tactile inference model."""
 
-    def __init__(self, config: MEXConfig):
+    def __init__(self, config: MEDexConfig):
         super().__init__()
         self.config = config
         self.dtype = torch.bfloat16
@@ -405,7 +405,7 @@ class MEXModel(nn.Module):
         action_timestep: torch.Tensor,
         tactile_timestep: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Run one ME-X-1.0 Full-Joint V-A-T flow-velocity evaluation."""
+        """Run one ME-Dex-1.0 Full-Joint V-A-T flow-velocity evaluation."""
         batch_size = int(video_latent.shape[0])
         video_tokens = self.video_module.prepare_input(video_latent.to(self.dtype))
         registers = (
@@ -492,6 +492,7 @@ class MEXModel(nn.Module):
         video_schedule_shift: float = 5.0,
         action_schedule_shift: float = 5.0,
         tactile_observed_source: torch.Tensor,
+        tactile_observed_support_source: torch.Tensor,
         tactile_observed_frame_times: torch.Tensor,
         tactile_future_query_times: torch.Tensor,
         tactile_schedule_shift: float = 5.0,
@@ -524,6 +525,7 @@ class MEXModel(nn.Module):
 
         tactile_observed, _ = self.tactile_codec.encode_condition(
             tactile_observed_source,
+            observed_support_source=tactile_observed_support_source,
             observed_frame_times=tactile_observed_frame_times,
             future_query_times=tactile_future_query_times,
         )
@@ -575,9 +577,9 @@ class MEXModel(nn.Module):
                     tactile_timestep=(tactile_t * 1000).expand(batch).to(self.dtype),
                 )
             )
-            video_latent += video_velocity * (video_sigmas[step + 1] - video_t)
-            action_latent += action_velocity * (action_sigmas[step + 1] - action_t)
-            tactile_future += (
+            video_latent = video_latent + video_velocity * (video_sigmas[step + 1] - video_t)
+            action_latent = action_latent + action_velocity * (action_sigmas[step + 1] - action_t)
+            tactile_future = tactile_future + (
                 tactile_velocity[:, tactile_config.condition_slices :]
                 * (tactile_sigmas[step + 1] - tactile_t)
             )

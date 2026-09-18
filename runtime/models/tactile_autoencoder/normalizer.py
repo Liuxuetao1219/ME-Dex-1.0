@@ -1,72 +1,77 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Mapping
-
 import torch
+import torch.nn as nn
+
+from .normalization_config import ForceNormalizationV41Config
 
 
-@dataclass(frozen=True)
-class RobustChannelStats:
-    bias: tuple[float, float, float]
-    scale: tuple[float, float, float]
-    quantile: float = 0.999
+class ForceNormalizerV41(nn.Module):
+    """Smooth vector deadband followed by per-channel signed-asinh."""
 
+    def __init__(self, config: ForceNormalizationV41Config):
+        super().__init__()
+        self.config = config
+        knee = torch.tensor(config.knee_n, dtype=torch.float32)
+        upper = torch.tensor(config.upper_n, dtype=torch.float32)
+        self.register_buffer("knee_n", knee, persistent=True)
+        self.register_buffer("upper_n", upper, persistent=True)
+        self.register_buffer("denominator", torch.asinh(upper / knee), persistent=True)
 
-class DomainRobustNormalizer:
-    """Zero-preserving, per-domain robust normalization shared by regions."""
+    @staticmethod
+    def _channel_view(values: torch.Tensor, channels: torch.Tensor) -> torch.Tensor:
+        shape = [1] * values.ndim
+        shape[-3] = 3
+        return channels.reshape(shape)
 
-    def __init__(
-        self,
-        groups: Mapping[int, RobustChannelStats],
-        eps: float = 1e-6,
-        bias_mode: str = "fixed_zero",
-    ):
-        if not groups:
-            raise ValueError("At least one normalization group is required")
-        self.groups = dict(groups)
-        self.eps = float(eps)
-        self.bias_mode = str(bias_mode)
-        if self.bias_mode != "fixed_zero":
-            raise ValueError(
-                "Only fixed_zero is supported without explicit no-contact labels"
-            )
-
-    def _parameters(
-        self, group_ids: torch.Tensor, reference: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        biases, scales = [], []
-        for group in group_ids.reshape(-1).tolist():
-            if int(group) not in self.groups:
-                raise KeyError(f"Unknown normalization group {group}")
-            stats = self.groups[int(group)]
-            biases.append(stats.bias)
-            scales.append(stats.scale)
-        # Channel is the third dimension from the end: [B,...,3,H,W].
-        shape = (len(biases),) + (1,) * (reference.ndim - 4) + (3, 1, 1)
-        bias = reference.new_tensor(biases).reshape(shape)
-        scale = reference.new_tensor(scales).reshape(shape)
-        return bias, scale
+    def deadband_gate(self, physical_force: torch.Tensor) -> torch.Tensor:
+        magnitude = physical_force.float().norm(dim=-3, keepdim=True)
+        unit = (magnitude - self.config.deadband_low_n) / (
+            self.config.deadband_high_n - self.config.deadband_low_n
+        )
+        unit = unit.clamp(0.0, 1.0)
+        return unit.square() * (3.0 - 2.0 * unit)
 
     def normalize(
-        self, values: torch.Tensor, group_ids: torch.Tensor, valid: torch.Tensor
-    ) -> torch.Tensor:
-        bias, scale = self._parameters(group_ids, values)
-        result = (values - bias) / scale.clamp_min(self.eps)
-        return result * valid.to(result.dtype)
+        self, physical_force: torch.Tensor, support_mask: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if physical_force.shape[-3] != 3:
+            raise ValueError("physical force channel dimension must be three")
+        support = support_mask.to(dtype=physical_force.dtype)
+        physical = physical_force * support
+        gate = self.deadband_gate(physical)
+        cleaned = physical * gate
+        knee = self._channel_view(cleaned, self.knee_n)
+        denominator = self._channel_view(cleaned, self.denominator)
+        normalized = torch.asinh(cleaned / knee) / denominator
+        normalized = normalized.clamp(-1.0, 1.0) * support
+        # TFA2 normal force uses positive compression.  Tiny negative numerical
+        # residues are represented as zero; larger violations belong in audit.
+        normalized_normal = normalized.select(-3, 0).clamp_min(0.0)
+        normalized = normalized.clone()
+        normalized.select(-3, 0).copy_(normalized_normal)
+        return normalized, cleaned, gate * support
 
-    @classmethod
-    def from_state_dict(cls, state: Mapping) -> "DomainRobustNormalizer":
-        groups = {
-            int(key): RobustChannelStats(
-                tuple(value["bias"]), tuple(value["scale"]), float(value["quantile"])
-            )
-            for key, value in state["groups"].items()
+    def denormalize(
+        self, normalized_force: torch.Tensor, support_mask: torch.Tensor
+    ) -> torch.Tensor:
+        if normalized_force.shape[-3] != 3:
+            raise ValueError("normalized force channel dimension must be three")
+        support = support_mask.to(dtype=normalized_force.dtype)
+        normalized = normalized_force.clamp(-1.0, 1.0) * support
+        knee = self._channel_view(normalized, self.knee_n)
+        denominator = self._channel_view(normalized, self.denominator)
+        physical = knee * torch.sinh(normalized * denominator)
+        return physical * support
+
+    def contract(self) -> dict:
+        return {
+            "type": "per_channel_signed_asinh",
+            "channel_order": ["normal", "shear_u", "shear_v"],
+            "deadband_low_n": self.config.deadband_low_n,
+            "deadband_high_n": self.config.deadband_high_n,
+            "knee_n": list(self.config.knee_n),
+            "upper_n": list(self.config.upper_n),
+            "normal_range": [0.0, 1.0],
+            "tangential_range": [-1.0, 1.0],
         }
-        if int(state.get("version", 0)) != 2:
-            raise ValueError("Unsupported tactile normalizer schema; regenerate stats")
-        return cls(
-            groups,
-            eps=float(state.get("eps", 1e-6)),
-            bias_mode=str(state.get("bias_mode", "")),
-        )
