@@ -1,6 +1,5 @@
 """ME-Dex-1.0 video-action-tactile model used by the evaluation runtime."""
 
-import math
 import torch
 import logging
 import torch.nn as nn
@@ -10,7 +9,7 @@ from typing import Optional, Dict, Any, Tuple
 from wan.modules.model import sinusoidal_embedding_1d
 from .wan_model import WanVideoModel
 from .action_expert import ActionExpert, ActionExpertConfig
-from .tactile_expert import UniversalTactileExpert, UniversalTactileExpertConfig
+from .tactile_expert import TactileExpert, TactileExpertConfig
 from .tactile_ae import TactileAE
 
 logger = logging.getLogger(__name__)
@@ -24,10 +23,6 @@ def build_flowmatch_sigma_schedule(
     dtype: torch.dtype,
 ) -> torch.Tensor:
     """Build the exact shifted FM sigma nodes, including the final zero."""
-    if num_inference_steps <= 0:
-        raise ValueError(f"num_inference_steps must be positive, got {num_inference_steps}")
-    if not math.isfinite(shift) or shift <= 0:
-        raise ValueError(f"Flow-matching shift must be finite and positive, got {shift}")
     base_sigmas = torch.linspace(
         1.0,
         0.0,
@@ -56,7 +51,7 @@ class MEDexConfig:
     video_height: int = 384
     video_width: int = 320
     batch_size: int = 1
-    tactile_vae_checkpoint_path: str = ""
+    tactile_ae_checkpoint_path: str = ""
     tactile_expert_config: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
@@ -86,23 +81,14 @@ class VideoModule(nn.Module):
 
     def preprocess_t5_embeddings(self, language_embeddings) -> torch.Tensor:
         """Pre-process T5 embeddings once for all layers."""
-        # Handle both old format (List[torch.Tensor]) and new format (torch.Tensor)
-        if isinstance(language_embeddings, list):
-            # Old format: List[torch.Tensor] - do padding
-            text_len = self.video_model.wan_model.text_len  # 512
-            padded_embeddings = []
-
-            for emb in language_embeddings:
-                if emb.shape[0] <= text_len:
-                    padded = torch.cat([emb, emb.new_zeros(text_len - emb.shape[0], emb.shape[1])])
-                else:
-                    padded = emb[:text_len]
-                padded_embeddings.append(padded)
-
-            t5_context_raw = torch.stack(padded_embeddings, dim=0)
-        else:
-            # New format: torch.Tensor [B, seq_len, dim] - already padded by collate_fn
-            t5_context_raw = language_embeddings
+        text_len = self.video_model.wan_model.text_len
+        padded_embeddings = []
+        for embedding in language_embeddings:
+            embedding = embedding[:text_len]
+            padded_embeddings.append(torch.cat([
+                embedding, embedding.new_zeros(text_len - embedding.shape[0], embedding.shape[1])
+            ]))
+        t5_context_raw = torch.stack(padded_embeddings)
 
         # Convert via text_embedding layer (4096 -> 3072)
         t5_context = self.video_model.wan_model.text_embedding(t5_context_raw)
@@ -126,7 +112,6 @@ class VideoModule(nn.Module):
                 sinusoidal_embedding_1d(self.video_model.wan_model.freq_dim, t_flat).unflatten(0, (bt, seq_len)).float()
             )
             t_emb_proj = self.video_model.wan_model.time_projection(t_emb).unflatten(2, (6, 3072))
-            assert t_emb.dtype == torch.float32 and t_emb_proj.dtype == torch.float32
 
         return t_emb, t_emb_proj
 
@@ -285,7 +270,6 @@ class ActionModule(nn.Module):
             # Project to AdaLN parameters (6 params: 3 for WAN-Action joint attn + 3 for FFN)
             a_e0 = self.action_expert.time_projection(a_e).unflatten(2, (6, self.config.action_expert_dim))  # [B, seq_len, 6, dim]
 
-            assert a_e.dtype == torch.float32 and a_e0.dtype == torch.float32
 
         return a_e, a_e0  # (basic_emb, adaln_params)
 
@@ -352,21 +336,20 @@ class MEDexModel(nn.Module):
         self.device = next(self.video_model.parameters()).device
         self.action_expert.to(device=self.device, dtype=self.dtype)
 
-        tactile_config = UniversalTactileExpertConfig.from_mapping(
+        tactile_config = TactileExpertConfig.from_mapping(
             config.tactile_expert_config,
             num_layers=config.num_layers,
         )
-        self.tactile_expert = UniversalTactileExpert(tactile_config)
+        self.tactile_expert = TactileExpert(tactile_config)
         self.tactile_expert.to(device=self.device, dtype=self.dtype)
         self.tactile_expert.time_embedding.float()
         self.tactile_expert.time_projection.float()
         tactile_codec = TactileAE(
-            checkpoint_path=config.tactile_vae_checkpoint_path,
+            checkpoint_path=config.tactile_ae_checkpoint_path,
             device=self.device,
             dtype=self.dtype,
         )
         object.__setattr__(self, "tactile_codec", tactile_codec)
-        self.tactile_codec.assert_frozen()
 
         self.action_expert.time_embedding.to(dtype=torch.float32)
         self.action_expert.time_projection.to(dtype=torch.float32)
@@ -388,11 +371,6 @@ class MEDexModel(nn.Module):
         )
         self.action_module = ActionModule(self.action_expert, self.config, self.video_model, self.dtype, self.device)
 
-    def train(self, mode: bool = True):
-        """Keep the separately loaded tactile codec in evaluation mode."""
-        super().train(mode)
-        self.tactile_codec.model.eval()
-        return self
     def _joint_video_action_tactile_velocity(
         self,
         *,

@@ -6,20 +6,18 @@ import torch
 import torch.nn as nn
 
 from .anatomy import anatomy_token_ids, anatomy_token_presence
-from .config import AnatomyTactileAEV3Config
+from .config import TactileEncoderConfig
 from .layers import FP32LayerNorm, LayerScaledSelfAttention
-from .surface_encoder import SurfaceTokenizerV3
+from .surface_encoder import SurfaceTokenizer
 
 
-class AnatomyEncoderV3(nn.Module):
-    """Frame-wise 30-region encoder with 12 fixed anatomical output slots."""
+class TactileEncoder(nn.Module):
+    """Frame-wise tactile encoder with 12 anatomical output slots."""
 
-    def __init__(self, config: AnatomyTactileAEV3Config):
+    def __init__(self, config: TactileEncoderConfig):
         super().__init__()
-        # The audited Clean6 local DCAE preserves each 10x14 surface. Regions do
-        # not communicate across anatomical groups before the 12 named tokens
-        # have been formed.
-        self.surface_tokenizer = SurfaceTokenizerV3(config)
+        # Encode each surface locally before pooling anatomical tokens.
+        self.surface_tokenizer = SurfaceTokenizer(config)
         region_width = config.tokens_per_region * config.latent_dim
         self.region_projection = nn.Sequential(
             FP32LayerNorm(region_width),

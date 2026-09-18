@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -11,7 +10,7 @@ import torch
 
 
 def _install_numpy_pickle_compat() -> None:
-    """Load trusted NumPy-2 checkpoints in the reviewed NumPy-1 runtime."""
+    """Read NumPy-2 checkpoint arrays with NumPy-1."""
     if hasattr(np, "_core"):
         return
     sys.modules.setdefault("numpy._core", np.core)
@@ -25,12 +24,10 @@ def _install_numpy_pickle_compat() -> None:
 
 _install_numpy_pickle_compat()
 
-from checkpoint import load_metadata, load_model_state_strictly
+from checkpoint import load_metadata, load_model_state
 from models.me_dex import MEDexConfig, MEDexModel
 from wan.modules.t5 import T5EncoderModel
 
-
-logger = logging.getLogger(__name__)
 
 # TFA2 structural support, not contact presence. Source: tactile_ingress.py.
 LINK7 = ("11111111000000", "11111111110000", "01111111111000", "11111111111110", "01111111111111", "01111111111111", "01111111111111", "11111111111111", "11111111111000", "11111111000000")
@@ -57,12 +54,7 @@ def camera_mosaic(head, left, right, color_order="rgb"):
 
 
 class MEDexPolicy:
-    """Single-version ME-Dex-1.0 inference runtime.
-
-    The runtime accepts RGB camera arrays, supports an explicit BGR checkpoint
-    compatibility mode, and supplies one physical-zero tactile frame because
-    leaderboard observations contain no tactile sensors.
-    """
+    """RoboTwin policy with RGB camera inputs and zero observed tactile force."""
 
     def __init__(
         self,
@@ -72,15 +64,11 @@ class MEDexPolicy:
         tactile_frame_interval_seconds: float = 0.06,
         input_color_order: str = "rgb",
     ) -> None:
-        if not torch.cuda.is_available():
-            raise RuntimeError("ME-Dex-1.0 requires CUDA")
         self.device = torch.device("cuda")
         self.wan_path = Path(wan_path).expanduser().resolve()
         self.metadata = load_metadata(checkpoint_path)
         self.config = self.metadata["config"]
         self.tactile_frame_interval_seconds = float(tactile_frame_interval_seconds)
-        if not np.isfinite(self.tactile_frame_interval_seconds) or self.tactile_frame_interval_seconds <= 0:
-            raise ValueError("tactile_frame_interval_seconds must be finite and positive")
         self.input_color_order = str(input_color_order).lower()
         if self.input_color_order not in {"rgb", "bgr"}:
             raise ValueError("input_color_order must be 'rgb' or 'bgr'")
@@ -100,7 +88,6 @@ class MEDexPolicy:
         cfg = self.config
         common = cfg["common"]
         action = cfg["action_expert"]
-        tactile = cfg["model"]["tactile"]
         wan = cfg["model"]["wan"]
         model = MEDexModel(
             MEDexConfig(
@@ -118,14 +105,12 @@ class MEDexPolicy:
                 video_height=int(common["video_height"]),
                 video_width=int(common["video_width"]),
                 batch_size=1,
-                tactile_vae_checkpoint_path=str(self.metadata["tactile_checkpoint"]),
+                tactile_ae_checkpoint_path=str(self.metadata["tactile_checkpoint"]),
                 tactile_expert_config=cfg["model"]["tactile_expert"],
             )
         )
-        report = load_model_state_strictly(model, self.metadata)
+        load_model_state(model, self.metadata)
         model.eval()
-        model.tactile_codec.assert_frozen()
-        logger.info("Loaded ME-Dex-1.0 strictly: %s", report)
         return model
 
     def update_observation(

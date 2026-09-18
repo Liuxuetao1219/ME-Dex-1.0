@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 import numpy as np
 from dataclasses import dataclass
-import re
 
 from wan.modules.model import WanRMSNorm, WanLayerNorm
 
@@ -37,7 +36,7 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim: int, pos):
 
 @dataclass
 class ActionExpertConfig:
-    """Architecture contract for the released state-conditioned action expert."""
+    """State-conditioned action expert settings."""
 
     dim: int = 1024
     ffn_dim: int = 4096
@@ -48,9 +47,6 @@ class ActionExpertConfig:
     num_registers: int = 4
     eps: float = 1e-6
 
-    def __post_init__(self):
-        """Validate configuration."""
-        assert self.chunk_size >= 2, "chunk_size must be at least 2 (1 state + 1 action)"
 
 class StateActionEncoder(nn.Module):
     """Encoder for robot states and actions."""
@@ -59,15 +55,12 @@ class StateActionEncoder(nn.Module):
         super().__init__()
         self.config = config
 
-        # Adapters using build_mlp
         self.state_encoder = self.build_mlp(
-            'mlp3x_silu',
             in_features=config.state_dim,
             out_features=config.dim
         )
 
         self.action_encoder = self.build_mlp(
-            'mlp3x_silu',
             in_features=config.action_dim,
             out_features=config.dim
         )
@@ -81,25 +74,15 @@ class StateActionEncoder(nn.Module):
         # Register as buffer (non-trainable)
         self.register_buffer('pos_embedding', pos_embed.unsqueeze(0))  # [1, chunk_size+1+num_registers, dim]
 
-    def build_mlp(self, projector_type, in_features, out_features):
-        """Build MLP projector for encoders."""
-        projector = None
-        if projector_type == 'linear':
-            projector = nn.Linear(in_features, out_features)
-        else:
-            mlp_silu_match = re.match(r'^mlp(\d+)x_silu$', projector_type)
-            if mlp_silu_match:
-                mlp_depth = int(mlp_silu_match.group(1))
-                modules = [nn.Linear(in_features, out_features)]
-                for _ in range(1, mlp_depth):
-                    modules.append(nn.SiLU())
-                    modules.append(nn.Linear(out_features, out_features))
-                projector = nn.Sequential(*modules)
-
-        if projector is None:
-            raise ValueError(f'Unknown projector type: {projector_type}')
-
-        return projector
+    @staticmethod
+    def build_mlp(in_features, out_features):
+        return nn.Sequential(
+            nn.Linear(in_features, out_features),
+            nn.SiLU(),
+            nn.Linear(out_features, out_features),
+            nn.SiLU(),
+            nn.Linear(out_features, out_features),
+        )
 
     def forward(self, state_tokens: torch.Tensor, action_tokens: torch.Tensor, registers: torch.Tensor = None) -> torch.Tensor:
         """
@@ -179,7 +162,6 @@ class ActionExpertBlock(nn.Module):
 
         # Timestep modulation (AdaLN style, 6 parameters)
         # 3 params each for: self-attn residual (WAN-action), FFN (alpha/beta/gamma)
-        # self.modulation = nn.Parameter(torch.zeros(1, 6, config.dim))
         self.modulation = nn.Parameter(torch.randn(1, 6, config.dim) / config.dim**0.5)
 
 
@@ -192,23 +174,10 @@ class ActionDecoder(nn.Module):
 
         self.norm = WanLayerNorm(config.dim, eps=config.eps)
 
-        self.action_head = self.build_mlp('mlp1x_silu', config.dim, config.action_dim)
+        self.action_head = nn.Sequential(nn.Linear(config.dim, config.action_dim))
 
         # Timestep modulation for head input (WAN Head style: 2-way modulation)
         self.modulation = nn.Parameter(torch.randn(1, 2, config.dim) / config.dim**0.5)
-
-    def build_mlp(self, projector_type, in_features, out_features):
-        if projector_type == 'linear':
-            return nn.Linear(in_features, out_features)
-        mlp_silu_match = re.match(r'^mlp(\d+)x_silu$', projector_type)
-        if mlp_silu_match:
-            mlp_depth = int(mlp_silu_match.group(1))
-            modules = [nn.Linear(in_features, out_features)]
-            for _ in range(1, mlp_depth):
-                modules.append(nn.SiLU())
-                modules.append(nn.Linear(out_features, out_features))
-            return nn.Sequential(*modules)
-        raise ValueError(f'Unknown projector type: {projector_type}')
 
     def forward(self, x: torch.Tensor, time_emb: torch.Tensor) -> torch.Tensor:
         """

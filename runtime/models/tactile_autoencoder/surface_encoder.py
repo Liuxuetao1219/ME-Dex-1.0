@@ -7,14 +7,14 @@ import torch.nn.functional as F
 from .residual import ResidualBlock2d
 from .surface_type import surface_type_ids
 
-from .config import AnatomyTactileAEV3Config
+from .config import TactileEncoderConfig
 from .layers import FP32LayerNorm
 
 
-class LocalSurfaceEncoderV3(nn.Module):
+class LocalSurfaceEncoder(nn.Module):
     """Clean six-channel encoder for one complete 10x14 tactile surface."""
 
-    def __init__(self, config: AnatomyTactileAEV3Config):
+    def __init__(self, config: TactileEncoderConfig):
         super().__init__()
         self.shortcut_projection = nn.Conv2d(4 * config.input_channels, 128, 1)
         self.main_input = nn.Conv2d(config.input_channels, 64, 3, padding=1)
@@ -38,10 +38,10 @@ class LocalSurfaceEncoderV3(nn.Module):
         }
 
 
-class SurfaceTokenizerV3(nn.Module):
-    def __init__(self, config: AnatomyTactileAEV3Config):
+class SurfaceTokenizer(nn.Module):
+    def __init__(self, config: TactileEncoderConfig):
         super().__init__()
-        self.surface_encoder = LocalSurfaceEncoderV3(config)
+        self.surface_encoder = LocalSurfaceEncoder(config)
         self.hand_embedding = nn.Embedding(config.hand_side_types, config.latent_dim, padding_idx=0)
         self.surface_type_embedding = nn.Embedding(
             config.surface_type_types, config.latent_dim, padding_idx=0
@@ -83,7 +83,7 @@ class SurfaceTokenizerV3(nn.Module):
         token_valid = denominator.flatten(1).gt(0)
         surface_tokens = surface_tokens.reshape(batch, regions, 4, -1)
         token_valid = token_valid.reshape(batch, regions, 4)
-        surface_ids = surface_type_ids(finger_id, segment_id, include_proximal=self.config.extended_pad_layout)
+        surface_ids = surface_type_ids(finger_id, segment_id)
         identity = self.hand_embedding(hand_side_id) + self.surface_type_embedding(surface_ids)
         identity = identity.to(surface_tokens.dtype)
         surface_tokens = self.output_norm(surface_tokens + identity[:, :, None])

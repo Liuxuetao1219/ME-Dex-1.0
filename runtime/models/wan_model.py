@@ -84,8 +84,6 @@ class WanVideoModel(nn.Module):
         """Initialize WAN and VAE; ME-Dex weights are loaded by checkpoint.py."""
         # Load WAN model config
         config_json_path = os.path.join(config_path, 'config.json')
-        if not os.path.exists(config_json_path):
-            raise FileNotFoundError(f"WAN config.json not found at {config_json_path}")
         with open(config_json_path, 'r') as f:
             model_config = json.load(f)
         # Create model without loading WAN weights

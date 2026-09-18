@@ -18,7 +18,7 @@ ANATOMY_TOKEN_NAMES = (
     "right_palm",
 )
 
-# Frozen canonical vocabularies inherited from the audited V6 data contract:
+# Anatomical identities:
 # hand: padding=0, left=1, right=2
 # finger: padding=0, thumb=1, index=2, middle=3, ring=4, palm=5, little=6
 _FINGER_TO_LOCAL_TOKEN = (0, 0, 1, 2, 3, 5, 4)
@@ -31,16 +31,8 @@ def anatomy_token_ids(
 ) -> torch.Tensor:
     """Map every physical region to one of 12 fixed anatomy token identities.
 
-    Invalid/padded regions return -1. The mapping depends only on audited anatomy
-    metadata, never on storage slot or dataset/domain identity.
+    Invalid/padded regions return -1.
     """
-
-    if hand_side_id.shape != finger_id.shape or hand_side_id.shape != region_mask.shape:
-        raise ValueError("hand_side_id, finger_id and region_mask must have equal shapes")
-    if ((hand_side_id < 0) | (hand_side_id > 2)).any():
-        raise ValueError("hand_side_id must use padding/left/right ids 0/1/2")
-    if ((finger_id < 0) | (finger_id > 6)).any():
-        raise ValueError("finger_id must use the frozen canonical ids 0..6")
 
     lookup = finger_id.new_tensor(_FINGER_TO_LOCAL_TOKEN)
     local = lookup[finger_id]

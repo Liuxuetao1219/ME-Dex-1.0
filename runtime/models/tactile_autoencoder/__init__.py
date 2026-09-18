@@ -1,2 +1,2 @@
-from .config import AnatomyTactileAEV3Config
-from .encoder import AnatomyEncoderV3
+from .config import TactileEncoderConfig
+from .encoder import TactileEncoder

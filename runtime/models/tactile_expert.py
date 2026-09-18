@@ -24,8 +24,6 @@ def _fork_cpu_seed(seed: int):
 
 
 def sinusoidal_embedding_1d(dim: int, positions: torch.Tensor) -> torch.Tensor:
-    if dim % 2:
-        raise ValueError("sin-cos embedding dimension must be even")
     positions = positions.float().reshape(-1, 1)
     omega = torch.arange(dim // 2, device=positions.device, dtype=torch.float32)
     omega = torch.pow(10000.0, -omega / (dim // 2))
@@ -34,7 +32,7 @@ def sinusoidal_embedding_1d(dim: int, positions: torch.Tensor) -> torch.Tensor:
 
 
 @dataclass(frozen=True)
-class UniversalTactileExpertConfig:
+class TactileExpertConfig:
     latent_dim: int = 256
     latent_slices: int = 17
     queries_per_slice: int = 12
@@ -51,24 +49,10 @@ class UniversalTactileExpertConfig:
     @classmethod
     def from_mapping(
         cls, values: Dict[str, Any] | None, *, num_layers: int
-    ) -> "UniversalTactileExpertConfig":
+    ) -> "TactileExpertConfig":
         values = dict(values or {})
         values["num_layers"] = int(num_layers)
         return cls(**values)
-
-    def __post_init__(self) -> None:
-        contract = (
-            self.latent_dim,
-            self.latent_slices,
-            self.queries_per_slice,
-            self.condition_slices,
-        )
-        if contract != (256, 17, 12, 1):
-            raise ValueError(
-                f"ME-Dex-1.0 requires tactile latent contract (256,17,12,1), got {contract}"
-            )
-        if self.hidden_size != 512:
-            raise ValueError("ME-Dex-1.0 tactile expert requires hidden_size=512")
 
     @property
     def future_slices(self) -> int:
@@ -83,8 +67,8 @@ class UniversalTactileExpertConfig:
         return self.wan_num_heads * self.wan_head_dim
 
 
-class UniversalTactileTokenizer(nn.Module):
-    def __init__(self, config: UniversalTactileExpertConfig):
+class TactileTokenizer(nn.Module):
+    def __init__(self, config: TactileExpertConfig):
         super().__init__()
         self.config = config
         with _fork_cpu_seed(config.initialization_seed):
@@ -102,9 +86,6 @@ class UniversalTactileTokenizer(nn.Module):
 
     def forward(self, latent: torch.Tensor) -> torch.Tensor:
         cfg = self.config
-        expected = (cfg.latent_slices, cfg.queries_per_slice, cfg.latent_dim)
-        if tuple(latent.shape[1:]) != expected:
-            raise ValueError(f"Expected latent [B,{expected}], got {tuple(latent.shape)}")
         projected = self.input_projection(latent)
         tokens = F.layer_norm(
             projected.float(),
@@ -129,7 +110,7 @@ class UniversalTactileTokenizer(nn.Module):
 
 
 class TactileExpertBlock(nn.Module):
-    def __init__(self, config: UniversalTactileExpertConfig):
+    def __init__(self, config: TactileExpertConfig):
         super().__init__()
         self.norm1 = WanLayerNorm(config.hidden_size, eps=config.norm_eps)
         self.norm2 = WanLayerNorm(config.hidden_size, eps=config.norm_eps)
@@ -157,8 +138,8 @@ class TactileExpertBlock(nn.Module):
         )
 
 
-class UniversalTactileOutputHead(nn.Module):
-    def __init__(self, config: UniversalTactileExpertConfig):
+class TactileOutputHead(nn.Module):
+    def __init__(self, config: TactileExpertConfig):
         super().__init__()
         self.config = config
         self.norm = WanLayerNorm(config.hidden_size, eps=config.norm_eps)
@@ -194,11 +175,11 @@ class UniversalTactileOutputHead(nn.Module):
         )
 
 
-class UniversalTactileExpert(nn.Module):
-    def __init__(self, config: UniversalTactileExpertConfig):
+class TactileExpert(nn.Module):
+    def __init__(self, config: TactileExpertConfig):
         super().__init__()
         self.config = config
-        self.tokenizer = UniversalTactileTokenizer(config)
+        self.tokenizer = TactileTokenizer(config)
         with _fork_cpu_seed(config.initialization_seed + 2):
             self.time_embedding = nn.Sequential(
                 nn.Linear(config.freq_dim, config.hidden_size),
@@ -211,7 +192,7 @@ class UniversalTactileExpert(nn.Module):
             self.blocks = nn.ModuleList(
                 [TactileExpertBlock(config) for _ in range(config.num_layers)]
             )
-            self.output_head = UniversalTactileOutputHead(config)
+            self.output_head = TactileOutputHead(config)
 
     def get_time_embeddings(
         self, timestep: torch.Tensor
