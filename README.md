@@ -1,18 +1,41 @@
-# ME-Dex-1.0
+<h1 align="center">ME-Dex-1.0</h1>
+
+<p align="center">
+  Video–Action–Tactile Policy for Robotic Manipulation
+</p>
+
+<p align="center">
+  <a href="https://machembodied.com/ME-Dex/ME-Dex1.0.html">Technical Report</a>
+  &nbsp;·&nbsp;
+  <a href="https://huggingface.co/liuxuetao/ME-Dex-1.0-RoboTwin-Clean2Random-Leaderboard">Model Weights</a>
+  &nbsp;·&nbsp;
+  <a href="#getting-started">Getting Started</a>
+</p>
+
+---
 
 ME-Dex-1.0 is a video-action-tactile policy trained on RoboTwin Clean50. This repository provides its inference runtime for standardized RoboTwin leaderboard evaluation using XPolicyLib.
 
-## Model weights
+> **Coming soon:** Training code and data will be released publicly.
 
-Model and tactile AE weights are available at [liuxuetao/ME-Dex-1.0-RoboTwin-Clean2Random-Leaderboard](https://huggingface.co/liuxuetao/ME-Dex-1.0-RoboTwin-Clean2Random-Leaderboard). The runtime also uses the VAE, T5 encoder, tokenizer and config from [Wan-AI/Wan2.2-TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B).
+## Model Weights
 
-## Usage
+- **Policy & tactile AE:** [ME-Dex-1.0 on Hugging Face](https://huggingface.co/liuxuetao/ME-Dex-1.0-RoboTwin-Clean2Random-Leaderboard).
+- **Backbone assets:** VAE, T5 encoder, tokenizer and config from [Wan2.2-TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B).
 
-Install the dependencies with `pip install -r runtime/requirements.txt`.
+## Getting Started
 
-The evaluation interface supplies RGB observations. Set `input_color_order: bgr` so the runtime performs the single RGB-to-BGR conversion expected by the checkpoint. The runtime does not apply mean/std image normalization.
+Install the runtime dependencies:
 
-Clean50 training included additionally collected three-axis tactile force data. RoboTwin leaderboard observations contain no tactile measurements, so the current-frame tactile force is set to zero while preserving the sensor support mask. Future tactile states are predicted by the model.
+```bash
+pip install -r runtime/requirements.txt
+```
+
+### Evaluation Notes
+
+**Visual inputs.** The evaluation interface supplies RGB observations. Set `input_color_order: bgr` for a single RGB-to-BGR conversion, matching the checkpoint. No mean/std image normalization is applied.
+
+**Tactile inputs.** Clean50 training included additionally collected three-axis tactile force data. Leaderboard observations contain no tactile measurements, so the current-frame tactile force is set to zero while preserving the sensor support mask. Future tactile states are predicted by the model.
 
 ## Acknowledgements
 
