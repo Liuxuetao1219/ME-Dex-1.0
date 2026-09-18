@@ -1,7 +1,7 @@
-<h1 align="center">ME-Dex-1.0</h1>
+<h1 align="center">ME-Dex 1.0</h1>
 
 <p align="center">
-  Video–Action–Tactile Policy for Robotic Manipulation
+  Bringing Heterogeneous Tactile Sensing into World Action Modeling
 </p>
 
 <p align="center">
