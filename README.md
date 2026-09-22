@@ -22,7 +22,8 @@
 
 ME-Dex-1.0 is a video-action-tactile policy trained on RoboTwin Clean50. This repository provides its inference runtime and tactile encoder for standardized RoboTwin leaderboard evaluation using XPolicyLib.
 
-The training entry point is included under [`training/`](training/); the dataset release is coming soon.
+The training entry point is included under [`training/`](training/). The Clean50 tactile dataset is available on
+[Hugging Face](https://huggingface.co/datasets/liuxuetao/MachEmbodied-Dex1.0-RoboTwin-Clean50-Tactile).
 The Clean50 tactile replay procedure is documented in [`training/robotwin_tactile/`](training/robotwin_tactile/).
 
 <p align="center">
@@ -40,8 +41,8 @@ The Clean50 tactile replay procedure is documented in [`training/robotwin_tactil
 <div align="center">
 
 | Method | Clean → Clean | Clean → Random | Average |
-|:--|--:|--:|--:|
-| **ME-Dex-1.0** | **89.6%** | **68.1%** | **78.9%** |
+|:--|:--:|:--:|:--:|
+| **ME-Dex-1.0** | **88.9%** | **71.9%** | **80.4%** |
 
 </div>
 
