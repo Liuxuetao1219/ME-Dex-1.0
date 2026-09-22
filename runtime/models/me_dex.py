@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any, Tuple
 
 from wan.modules.model import sinusoidal_embedding_1d
-from wan.modules.attention import attention
+from wan.modules.attention import flash_attention as attention
 from .wan_model import WanVideoModel
 from .action_expert import ActionExpert, ActionExpertConfig
 from .tactile_expert import TactileExpert, TactileExpertConfig
