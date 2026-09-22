@@ -51,6 +51,46 @@ The Clean50 tactile replay procedure is documented in [`training/robotwin_tactil
 - **Policy & tactile AE:** [ME-Dex-1.0 on Hugging Face](https://huggingface.co/liuxuetao/ME-Dex-1.0-RoboTwin-Clean2Random-Leaderboard).
 - **Backbone assets:** VAE, T5 encoder, tokenizer and config from [Wan2.2-TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B).
 
+## Evaluation
+
+Clone XPolicyLab and install the adapter:
+
+```bash
+git clone https://github.com/XPolicyLab/XPolicyLab.git
+cd XPolicyLab
+bash policy/ME_Dex_1_0/install.sh
+```
+
+Download the released checkpoint and Wan2.2 assets:
+
+```bash
+CHECKPOINT_DIR=checkpoints/ME-Dex-1.0-RoboTwin-Clean2Random-Leaderboard
+
+hf download liuxuetao/ME-Dex-1.0-RoboTwin-Clean2Random-Leaderboard \
+  --local-dir "${CHECKPOINT_DIR}"
+
+hf download Wan-AI/Wan2.2-TI2V-5B \
+  config.json Wan2.2_VAE.pth models_t5_umt5-xxl-enc-bf16.pth \
+  google/umt5-xxl/special_tokens_map.json \
+  google/umt5-xxl/spiece.model \
+  google/umt5-xxl/tokenizer.json \
+  google/umt5-xxl/tokenizer_config.json \
+  --local-dir "${CHECKPOINT_DIR}/wan"
+```
+
+Run a RoboTwin evaluation through the standard interface:
+
+```bash
+cd policy/ME_Dex_1_0
+ROBOTWIN_TASK_CONFIG=demo_randomized \
+ROBOTWIN_TEST_NUM=100 \
+bash eval.sh RoboTwin adjust_bottle \
+  ME-Dex-1.0-RoboTwin-Clean2Random-Leaderboard \
+  arx_x5 joint 42 0 0 <policy_env> <robotwin_env>
+```
+
+Use `demo_clean` for Clean evaluation. The released configuration uses BGR input and zero observed tactile force with the sensor support mask preserved.
+
 ## Getting Started
 
 Install the runtime dependencies:
