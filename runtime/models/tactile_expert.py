@@ -1,4 +1,4 @@
-"""Tactile expert used by ME-Dex-1.0 joint attention."""
+"""Unified tactile expert for the ME-Dex video-action-tactile model."""
 
 from __future__ import annotations
 
@@ -33,11 +33,11 @@ def sinusoidal_embedding_1d(dim: int, positions: torch.Tensor) -> torch.Tensor:
 
 @dataclass(frozen=True)
 class TactileExpertConfig:
-    latent_dim: int = 256
-    latent_slices: int = 17
-    queries_per_slice: int = 12
-    condition_slices: int = 1
-    hidden_size: int = 512
+    latent_dim: int = 48
+    latent_slices: int = 18
+    queries_per_slice: int = 16
+    condition_slices: int = 2
+    hidden_size: int = 1024
     ffn_multiplier: int = 4
     num_layers: int = 30
     wan_num_heads: int = 24
@@ -45,11 +45,23 @@ class TactileExpertConfig:
     norm_eps: float = 1.0e-6
     freq_dim: int = 256
     initialization_seed: int = 42042
+    token_packing: str = "robotwin_left_right"
+
+    def __post_init__(self) -> None:
+        contract = (
+            self.latent_dim,
+            self.latent_slices,
+            self.queries_per_slice,
+            self.condition_slices,
+            self.hidden_size,
+            self.token_packing,
+        )
+        expected = (48, 18, 16, 2, 1024, "robotwin_left_right")
+        if contract != expected:
+            raise ValueError(f"Unsupported tactile contract: {contract}")
 
     @classmethod
-    def from_mapping(
-        cls, values: Dict[str, Any] | None, *, num_layers: int
-    ) -> "TactileExpertConfig":
+    def from_mapping(cls, values: Dict[str, Any] | None, *, num_layers: int):
         values = dict(values or {})
         values["num_layers"] = int(num_layers)
         return cls(**values)
@@ -59,12 +71,29 @@ class TactileExpertConfig:
         return self.latent_slices - self.condition_slices
 
     @property
+    def tokens_per_slice(self) -> int:
+        return 2
+
+    @property
+    def packed_latent_dim(self) -> int:
+        return self.queries_per_slice * self.latent_dim // self.tokens_per_slice
+
+    @property
     def sequence_length(self) -> int:
-        return self.latent_slices * self.queries_per_slice
+        return self.latent_slices * self.tokens_per_slice
 
     @property
     def wan_dim(self) -> int:
         return self.wan_num_heads * self.wan_head_dim
+
+    def pack_latent(self, latent: torch.Tensor) -> torch.Tensor:
+        expected = (self.latent_slices, self.queries_per_slice, self.latent_dim)
+        if tuple(latent.shape[1:]) != expected:
+            raise ValueError(f"Expected latent [B,{expected}], got {tuple(latent.shape)}")
+        return latent.reshape(*latent.shape[:-2], self.tokens_per_slice, self.packed_latent_dim)
+
+    def unpack_latent(self, latent: torch.Tensor) -> torch.Tensor:
+        return latent.reshape(*latent.shape[:-2], self.queries_per_slice, self.latent_dim)
 
 
 class TactileTokenizer(nn.Module):
@@ -72,21 +101,15 @@ class TactileTokenizer(nn.Module):
         super().__init__()
         self.config = config
         with _fork_cpu_seed(config.initialization_seed):
-            self.input_projection = nn.Linear(config.latent_dim, config.hidden_size)
+            self.input_projection = nn.Linear(config.packed_latent_dim, config.hidden_size)
             self.input_norm = nn.LayerNorm(config.hidden_size, eps=config.norm_eps)
-            self.type_embedding = nn.Parameter(
-                torch.randn(2, config.hidden_size) * 0.02
-            )
-            self.slice_embedding = nn.Parameter(
-                torch.randn(config.latent_slices, config.hidden_size) * 0.02
-            )
-            self.query_embedding = nn.Parameter(
-                torch.randn(config.queries_per_slice, config.hidden_size) * 0.02
-            )
+            self.type_embedding = nn.Parameter(torch.randn(2, config.hidden_size) * 0.02)
+            self.slice_embedding = nn.Parameter(torch.randn(config.latent_slices, config.hidden_size) * 0.02)
+            self.query_embedding = nn.Parameter(torch.randn(config.tokens_per_slice, config.hidden_size) * 0.02)
 
     def forward(self, latent: torch.Tensor) -> torch.Tensor:
         cfg = self.config
-        projected = self.input_projection(latent)
+        projected = self.input_projection(cfg.pack_latent(latent))
         tokens = F.layer_norm(
             projected.float(),
             (cfg.hidden_size,),
@@ -115,19 +138,12 @@ class TactileExpertBlock(nn.Module):
         self.norm1 = WanLayerNorm(config.hidden_size, eps=config.norm_eps)
         self.norm2 = WanLayerNorm(config.hidden_size, eps=config.norm_eps)
         self.wan_tactile_qkv = nn.Parameter(
-            torch.randn(
-                3,
-                config.wan_num_heads,
-                config.hidden_size,
-                config.wan_head_dim,
-            )
+            torch.randn(3, config.wan_num_heads, config.hidden_size, config.wan_head_dim)
             / (config.hidden_size * config.wan_head_dim) ** 0.5
         )
         self.wan_tactile_norm_q = WanRMSNorm(config.wan_dim, eps=config.norm_eps)
         self.wan_tactile_norm_k = WanRMSNorm(config.wan_dim, eps=config.norm_eps)
-        self.wan_tactile_o = nn.Linear(
-            config.wan_dim, config.hidden_size, bias=False
-        )
+        self.wan_tactile_o = nn.Linear(config.wan_dim, config.hidden_size, bias=False)
         self.ffn = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size * config.ffn_multiplier),
             nn.GELU(approximate="tanh"),
@@ -146,13 +162,11 @@ class TactileOutputHead(nn.Module):
         self.modulation = nn.Parameter(
             torch.randn(1, 2, config.hidden_size) / config.hidden_size**0.5
         )
-        self.projection = nn.Linear(config.hidden_size, config.latent_dim)
+        self.projection = nn.Linear(config.hidden_size, config.packed_latent_dim)
         nn.init.zeros_(self.projection.weight)
         nn.init.zeros_(self.projection.bias)
 
-    def forward(
-        self, tokens: torch.Tensor, time_embedding: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, tokens: torch.Tensor, time_embedding: torch.Tensor) -> torch.Tensor:
         cfg = self.config
         shift, scale = (
             self.modulation.unsqueeze(0) + time_embedding.unsqueeze(2)
@@ -161,16 +175,11 @@ class TactileOutputHead(nn.Module):
             self.norm(tokens) * (1 + scale.squeeze(2)) + shift.squeeze(2)
         )
         values = values.reshape(
-            tokens.shape[0],
-            cfg.latent_slices,
-            cfg.queries_per_slice,
-            cfg.latent_dim,
+            tokens.shape[0], cfg.latent_slices, cfg.tokens_per_slice, cfg.packed_latent_dim
         )
+        values = cfg.unpack_latent(values)
         return torch.cat(
-            (
-                torch.zeros_like(values[:, : cfg.condition_slices]),
-                values[:, cfg.condition_slices :],
-            ),
+            (torch.zeros_like(values[:, : cfg.condition_slices]), values[:, cfg.condition_slices :]),
             dim=1,
         )
 
@@ -194,9 +203,7 @@ class TactileExpert(nn.Module):
             )
             self.output_head = TactileOutputHead(config)
 
-    def get_time_embeddings(
-        self, timestep: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def get_time_embeddings(self, timestep: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         cfg = self.config
         slice_t = torch.cat(
             (
@@ -205,12 +212,12 @@ class TactileExpert(nn.Module):
             ),
             dim=1,
         )
-        token_t = slice_t.repeat_interleave(cfg.queries_per_slice, dim=1)
-        time_features = sinusoidal_embedding_1d(cfg.freq_dim, token_t).reshape(
+        token_t = slice_t.repeat_interleave(cfg.tokens_per_slice, dim=1)
+        features = sinusoidal_embedding_1d(cfg.freq_dim, token_t).reshape(
             timestep.shape[0], cfg.sequence_length, cfg.freq_dim
         )
-        time_features = time_features.to(self.time_embedding[0].weight.dtype)
-        embedded = self.time_embedding(time_features)
+        features = features.to(self.time_embedding[0].weight.dtype)
+        embedded = self.time_embedding(features)
         projected = self.time_projection(embedded).reshape(
             timestep.shape[0], cfg.sequence_length, 6, cfg.hidden_size
         )

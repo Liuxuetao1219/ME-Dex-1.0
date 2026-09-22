@@ -19,6 +19,28 @@ class FP32LayerNorm(nn.LayerNorm):
         return output.to(values.dtype)
 
 
+class PreNormSelfAttention(nn.Module):
+    def __init__(self, hidden: int, heads: int, ffn: int):
+        super().__init__()
+        self.attention_norm = FP32LayerNorm(hidden)
+        self.attention = nn.MultiheadAttention(hidden, heads, batch_first=True)
+        self.ffn_norm = FP32LayerNorm(hidden)
+        self.ffn = nn.Sequential(nn.Linear(hidden, ffn), nn.GELU(), nn.Linear(ffn, hidden))
+
+    def forward(self, values: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+        normalized = self.attention_norm(values)
+        update, _ = self.attention(
+            normalized,
+            normalized,
+            normalized,
+            key_padding_mask=~valid,
+            need_weights=False,
+        )
+        values = values + update
+        values = values + self.ffn(self.ffn_norm(values))
+        return values * valid[..., None].to(values.dtype)
+
+
 class LayerScaledSelfAttention(nn.Module):
     """Inter-anatomy attention with a small learnable residual at initialization."""
 
@@ -51,3 +73,14 @@ class LayerScaledSelfAttention(nn.Module):
         update = self.ffn(self.ffn_norm(values))
         values = values + self.ffn_scale.to(update.dtype) * update
         return values * valid[..., None].to(values.dtype)
+
+
+class ResidualMLP(nn.Module):
+    def __init__(self, hidden: int, ffn: int):
+        super().__init__()
+        self.norm = FP32LayerNorm(hidden)
+        self.net = nn.Sequential(nn.Linear(hidden, ffn), nn.GELU(), nn.Linear(ffn, hidden))
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        return values + self.net(self.norm(values))
+

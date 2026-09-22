@@ -107,6 +107,9 @@ class MEDexPolicy:
                 batch_size=1,
                 tactile_ae_checkpoint_path=str(self.metadata["tactile_checkpoint"]),
                 tactile_expert_config=cfg["model"]["tactile_expert"],
+                attention_topology=str(cfg["model"].get("attention_topology", "full_joint")),
+                h_bridge_joint_start_layer=int(cfg["model"].get("h_bridge_joint_start_layer", 8)),
+                h_bridge_joint_end_layer=int(cfg["model"].get("h_bridge_joint_end_layer", 22)),
             )
         )
         load_model_state(model, self.metadata)
@@ -146,11 +149,11 @@ class MEDexPolicy:
         dtype = self.model.dtype
         return {
             "tactile_observed_source": torch.zeros(
-                (1, 4, 1, 3, 10, 14), device=self.device, dtype=torch.float32
+                (1, 4, 2, 3, 10, 14), device=self.device, dtype=torch.float32
             ),
-            "tactile_observed_support_source": torch.from_numpy(support_mask()).to(self.device)[None, :, None, None],
+            "tactile_observed_support_source": torch.from_numpy(support_mask()).to(self.device)[None, :, None, None, :, :].expand(1, 4, 2, 1, 10, 14),
             "tactile_observed_frame_times": torch.tensor(
-                [[0.0]], device=self.device, dtype=dtype
+                [[-cadence, 0.0]], device=self.device, dtype=dtype
             ),
             "tactile_future_query_times": cadence
             * torch.arange(3, 49, 3, device=self.device, dtype=dtype).unsqueeze(0),

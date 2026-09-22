@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any, Tuple
 
 from wan.modules.model import sinusoidal_embedding_1d
+from wan.modules.attention import attention
 from .wan_model import WanVideoModel
 from .action_expert import ActionExpert, ActionExpertConfig
 from .tactile_expert import TactileExpert, TactileExpertConfig
@@ -53,10 +54,23 @@ class MEDexConfig:
     batch_size: int = 1
     tactile_ae_checkpoint_path: str = ""
     tactile_expert_config: Optional[Dict[str, Any]] = None
+    attention_topology: str = "full_joint"
+    h_bridge_joint_start_layer: int = 8
+    h_bridge_joint_end_layer: int = 22
 
     def __post_init__(self):
         """Normalize the one numeric value commonly parsed from JSON."""
         self.action_expert_norm_eps = float(self.action_expert_norm_eps)
+        if self.attention_topology not in {"full_joint", "h_bridge"}:
+            raise ValueError("attention_topology must be full_joint or h_bridge")
+        if self.attention_topology == "h_bridge":
+            if not 0 < self.h_bridge_joint_start_layer < self.h_bridge_joint_end_layer < self.num_layers:
+                raise ValueError("invalid H-bridge joint layer range")
+
+    def uses_joint_attention(self, layer_idx: int) -> bool:
+        if self.attention_topology == "full_joint":
+            return True
+        return self.h_bridge_joint_start_layer <= layer_idx < self.h_bridge_joint_end_layer
 
 class VideoModule(nn.Module):
     """Video processing module - handles WAN + T5 operations."""
@@ -152,6 +166,61 @@ class VideoModule(nn.Module):
         x = self.video_model.wan_model.head(video_tokens, video_time_emb)
         x = self.video_model.wan_model.unpatchify(x, self.grid_sizes)
         return torch.stack([u.float() for u in x], dim=0)
+
+    @staticmethod
+    def _expert_self_attention(normalized_tokens, qkv_weight, norm_q, norm_k, output_projection):
+        batch, token_count, _ = normalized_tokens.shape
+        _, heads, _, head_dim = qkv_weight.shape
+        qkv = torch.einsum("BTD,KNDE->KBTNE", normalized_tokens, qkv_weight)
+        query = norm_q(qkv[0].flatten(-2)).view(batch, token_count, heads, head_dim)
+        key = norm_k(qkv[1].flatten(-2)).view(batch, token_count, heads, head_dim)
+        value = qkv[2].view(batch, token_count, heads, head_dim)
+        return output_projection(attention(query, key, value, dtype=normalized_tokens.dtype).flatten(2))
+
+    def process_video_action_tactile_decoupled_attention(
+        self,
+        video_tokens,
+        action_tokens,
+        tactile_tokens,
+        video_adaln_modulation,
+        action_adaln_modulation,
+        tactile_adaln_modulation,
+        layer_idx,
+        action_block,
+        tactile_block,
+    ):
+        wan_layer = self.video_model.wan_model.blocks[layer_idx]
+        video_mod = video_adaln_modulation
+        action_mod = action_adaln_modulation
+        tactile_mod = tactile_adaln_modulation
+        normalized_video = wan_layer.norm1(video_tokens).float() * (1 + video_mod[1].squeeze(2)) + video_mod[0].squeeze(2)
+        normalized_action = action_block.norm1(action_tokens).float() * (1 + action_mod[1].squeeze(2)) + action_mod[0].squeeze(2)
+        normalized_tactile = tactile_block.norm1(tactile_tokens).float() * (1 + tactile_mod[1].squeeze(2)) + tactile_mod[0].squeeze(2)
+        batch, video_len, _ = normalized_video.shape
+        video_seq_lens = torch.full((batch,), video_len, dtype=torch.long, device=video_tokens.device)
+        freqs = self.video_model.wan_model.freqs
+        if freqs.device != video_tokens.device:
+            freqs = freqs.to(video_tokens.device)
+        video_output = wan_layer.self_attn(normalized_video, video_seq_lens, self.grid_sizes, freqs)
+        action_output = self._expert_self_attention(
+            normalized_action,
+            action_block.wan_action_qkv,
+            action_block.wan_action_norm_q,
+            action_block.wan_action_norm_k,
+            action_block.wan_action_o,
+        )
+        tactile_output = self._expert_self_attention(
+            normalized_tactile,
+            tactile_block.wan_tactile_qkv,
+            tactile_block.wan_tactile_norm_q,
+            tactile_block.wan_tactile_norm_k,
+            tactile_block.wan_tactile_o,
+        )
+        return (
+            video_tokens + video_output * video_mod[2].squeeze(2),
+            action_tokens + action_output * action_mod[2].squeeze(2),
+            tactile_tokens + tactile_output * tactile_mod[2].squeeze(2),
+        )
 
     def process_video_action_tactile_joint_attention(
         self,
@@ -415,8 +484,14 @@ class MEDexModel(nn.Module):
                 tactile_mod = self.tactile_expert.modulation(
                     self.tactile_expert.blocks[layer_idx], tactile_adaln
                 )
+                attention_method = (
+                    self.video_module.process_video_action_tactile_joint_attention
+                    if self.config.attention_topology == "full_joint"
+                    or self.config.h_bridge_joint_start_layer <= layer_idx < self.config.h_bridge_joint_end_layer
+                    else self.video_module.process_video_action_tactile_decoupled_attention
+                )
                 video_tokens, action_tokens, tactile_tokens = (
-                    self.video_module.process_video_action_tactile_joint_attention(
+                    attention_method(
                         video_tokens,
                         action_tokens,
                         tactile_tokens,

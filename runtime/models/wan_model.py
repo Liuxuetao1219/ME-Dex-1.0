@@ -8,7 +8,7 @@ import os
 import json
 
 from wan.modules.model import WanModel
-from wan.modules.vae2_2 import Wan2_2_VAE
+from wan.modules.vae import Wan2_2_VAE
 
 logger = logging.getLogger(__name__)
 
